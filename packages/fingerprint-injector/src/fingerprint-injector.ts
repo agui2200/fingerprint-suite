@@ -32,15 +32,30 @@ export class FingerprintInjector {
      * @param headers Headers to be filtered.
      * @returns Filtered headers.
      */
-    private onlyInjectableHeaders(headers: Record<string, string>): Record<string, string> {
-        const requestHeaders = ['accept-encoding', 'accept', 'cache-control', 'pragma',
-            'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site', 'sec-fetch-user', 'upgrade-insecure-requests'];
+    private onlyInjectableHeaders(headers: Record<string, string>, browserName?: string): Record<string, string> {
+        const requestHeaders = [
+            'accept-encoding',
+            'accept',
+            'cache-control',
+            'pragma',
+            'sec-fetch-dest',
+            'sec-fetch-mode',
+            'sec-fetch-site',
+            'sec-fetch-user',
+            'upgrade-insecure-requests',
+        ];
 
         const filteredHeaders = { ...headers };
 
         requestHeaders.forEach((header) => {
             delete filteredHeaders[header];
         });
+
+        // Chromium-based controlled browsers do not support `te` header.
+        // Probably needs more investigation, but for now, we can just remove it.
+        if (!(browserName?.toLowerCase().includes('firefox') ?? false)) {
+            delete filteredHeaders.te;
+        }
 
         return filteredHeaders;
     }
@@ -60,7 +75,8 @@ export class FingerprintInjector {
             enhancedFingerprint,
         );
 
-        await browserContext.setExtraHTTPHeaders(this.onlyInjectableHeaders(headers));
+        const browserName = browserContext.browser()?.browserType().name();
+        await browserContext.setExtraHTTPHeaders(this.onlyInjectableHeaders(headers, browserName));
 
         await browserContext.on('page', (page) => {
             page.emulateMedia({ colorScheme: 'dark' })
@@ -85,21 +101,25 @@ export class FingerprintInjector {
 
         await page.setUserAgent(userAgent);
 
-        await (await page.target().createCDPSession()).send('Page.setDeviceMetricsOverride', {
-            screenHeight: screen.height,
-            screenWidth: screen.width,
-            width: screen.width,
-            height: screen.height,
-            mobile: !!(/phone|android|mobile/.test(userAgent)),
-            screenOrientation: screen.height > screen.width ? { angle: 0, type: 'portraitPrimary' } : { angle: 90, type: 'landscapePrimary' },
-            deviceScaleFactor: screen.devicePixelRatio,
+        const browserVersion = await page.browser().version();
 
-        });
-        await page.setExtraHTTPHeaders(this.onlyInjectableHeaders(headers));
+        if (!browserVersion.toLowerCase().includes('firefox')) {
+            await (await page.target().createCDPSession()).send('Page.setDeviceMetricsOverride', {
+                screenHeight: screen.height,
+                screenWidth: screen.width,
+                width: screen.width,
+                height: screen.height,
+                mobile: !!(/phone|android|mobile/.test(userAgent)),
+                screenOrientation: screen.height > screen.width ? { angle: 0, type: 'portraitPrimary' } : { angle: 90, type: 'landscapePrimary' },
+                deviceScaleFactor: screen.devicePixelRatio,
+            });
 
-        await page.emulateMediaFeatures([
-            { name: 'prefers-color-scheme', value: 'dark' },
-        ]);
+            await page.setExtraHTTPHeaders(this.onlyInjectableHeaders(headers, browserVersion));
+
+            await page.emulateMediaFeatures([
+                { name: 'prefers-color-scheme', value: 'dark' },
+            ]);
+        }
 
         await page.evaluateOnNewDocument(this.getInjectableFingerprintFunction(enhancedFingerprint));
     }
@@ -251,12 +271,13 @@ export class FingerprintInjector {
 export async function newInjectedContext(
     browser: PWBrowser,
     options? : {
+        fingerprint?: BrowserFingerprintWithHeaders;
         fingerprintOptions?: Partial<FingerprintGeneratorOptions>;
         newContextOptions?: BrowserContextOptions;
     },
 ): Promise<BrowserContext> {
     const generator = new FingerprintGenerator();
-    const fingerprintWithHeaders = generator.getFingerprint(options?.fingerprintOptions ?? {});
+    const fingerprintWithHeaders = options?.fingerprint ?? generator.getFingerprint(options?.fingerprintOptions ?? {});
 
     const { fingerprint, headers } = fingerprintWithHeaders;
     const context = await browser.newContext({
@@ -283,11 +304,12 @@ export async function newInjectedContext(
 export async function newInjectedPage(
     browser: PPBrowser,
     options? : {
+        fingerprint?: BrowserFingerprintWithHeaders;
         fingerprintOptions?: Partial<FingerprintGeneratorOptions>;
     },
 ): Promise<Page> {
     const generator = new FingerprintGenerator();
-    const fingerprintWithHeaders = generator.getFingerprint(options?.fingerprintOptions ?? {});
+    const fingerprintWithHeaders = options?.fingerprint ?? generator.getFingerprint(options?.fingerprintOptions ?? {});
 
     const page = await browser.newPage();
 
